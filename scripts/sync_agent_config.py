@@ -55,6 +55,87 @@ def normalize_model(model_value, fallback='unknown'):
     return fallback
 
 
+def resolve_allow_agents(agent_cfg):
+    """
+    Resolve allowAgents from openclaw agent config.
+    Priority:
+    1) top-level allowAgents
+    2) subagents.allowAgents (legacy/alternate schema)
+    """
+    if not isinstance(agent_cfg, dict):
+        return []
+
+    top_allow = agent_cfg.get('allowAgents')
+    if isinstance(top_allow, list):
+        return top_allow
+
+    sub_cfg = agent_cfg.get('subagents')
+    if isinstance(sub_cfg, dict):
+        sub_allow = sub_cfg.get('allowAgents')
+        if isinstance(sub_allow, list):
+            return sub_allow
+
+    return []
+
+
+def collect_model_ids(cfg, default_model='unknown'):
+    """Collect model ids seen in openclaw.json defaults + agent entries."""
+    models = set()
+    if default_model and default_model != 'unknown':
+        models.add(default_model)
+
+    agents_cfg = cfg.get('agents', {})
+    for ag in agents_cfg.get('list', []) or []:
+        if not isinstance(ag, dict):
+            continue
+        model_id = normalize_model(ag.get('model', default_model), default_model)
+        if model_id and model_id != 'unknown':
+            models.add(model_id)
+    return models
+
+
+def infer_provider(model_id: str) -> str:
+    if not model_id:
+        return 'OpenClaw'
+    if '/' not in model_id:
+        return 'OpenClaw'
+    prefix = model_id.split('/', 1)[0].strip().lower()
+    provider_map = {
+        'anthropic': 'Anthropic',
+        'openai': 'OpenAI',
+        'openai-codex': 'OpenAI Codex',
+        'google': 'Google',
+        'copilot': 'Copilot',
+        'github-copilot': 'GitHub Copilot',
+    }
+    return provider_map.get(prefix, 'Custom')
+
+
+def infer_label(model_id: str) -> str:
+    if not model_id:
+        return 'unknown'
+    if '/' in model_id:
+        return model_id.split('/', 1)[1] or model_id
+    return model_id
+
+
+def merged_known_models(cfg, default_model='unknown'):
+    """Merge hardcoded KNOWN_MODELS with models actually seen in openclaw.json."""
+    merged = list(KNOWN_MODELS)
+    existing_ids = {m.get('id') for m in merged if isinstance(m, dict)}
+    discovered = sorted(collect_model_ids(cfg, default_model))
+    for model_id in discovered:
+        if model_id in existing_ids:
+            continue
+        merged.append({
+            'id': model_id,
+            'label': infer_label(model_id),
+            'provider': infer_provider(model_id),
+        })
+        existing_ids.add(model_id)
+    return merged
+
+
 def get_skills(workspace: str):
     skills_dir = pathlib.Path(workspace) / 'skills'
     skills = []
@@ -106,7 +187,7 @@ def main():
             'defaultModel': default_model,
             'workspace': workspace,
             'skills': get_skills(workspace),
-            'allowAgents': ag.get('subagents', {}).get('allowAgents', []),
+            'allowAgents': resolve_allow_agents(ag),
         })
         seen_ids.add(ag_id)
 
@@ -139,7 +220,7 @@ def main():
     payload = {
         'generatedAt': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'defaultModel': default_model,
-        'knownModels': KNOWN_MODELS,
+        'knownModels': merged_known_models(cfg, default_model),
         'agents': result,
     }
     DATA.mkdir(exist_ok=True)

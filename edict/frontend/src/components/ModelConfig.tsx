@@ -42,9 +42,16 @@ export default function ModelConfig() {
     return <div className="empty" style={{ gridColumn: '1/-1' }}>⚠️ 请先启动本地服务器</div>;
   }
 
-  const models = agentConfig.knownModels?.length
+  const baseModels = agentConfig.knownModels?.length
     ? agentConfig.knownModels.map((m) => ({ id: m.id, l: m.label, p: m.provider }))
     : FALLBACK_MODELS;
+  const baseModelIds = new Set(baseModels.map((m) => m.id));
+  const modelMap = new Map(baseModels.map((m) => [m.id, m]));
+  agentConfig.agents.forEach((ag) => {
+    if (!ag.model || modelMap.has(ag.model)) return;
+    modelMap.set(ag.model, { id: ag.model, l: ag.model, p: 'Custom' });
+  });
+  const models = Array.from(modelMap.values());
 
   const handleSelect = (agentId: string, val: string) => {
     setSelMap((p) => ({ ...p, [agentId]: val }));
@@ -80,6 +87,7 @@ export default function ModelConfig() {
           const sel = selMap[ag.id] || ag.model;
           const changed = sel !== ag.model;
           const st = statusMap[ag.id];
+          const isCustomCurrent = !baseModelIds.has(ag.model);
           return (
             <div className="mc-card" key={ag.id}>
               <div className="mc-top">
@@ -94,6 +102,7 @@ export default function ModelConfig() {
               </div>
               <div className="mc-cur">
                 当前: <b>{ag.model}</b>
+                {isCustomCurrent && <span style={{ color: 'var(--warn)' }}> (custom)</span>}
               </div>
               <select className="msel" value={sel} onChange={(e) => handleSelect(ag.id, e.target.value)}>
                 {models.map((m) => (
