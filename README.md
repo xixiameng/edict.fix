@@ -620,7 +620,7 @@ curl -X POST http://127.0.0.1:7891/api/scheduler-scan \
 1. Agent 间调用统一改为 `sessions_spawn`，并显式指定 `agentId`。  
    例如：中书省调用门下省时使用 `agentId: "menxia"`。
 2. 检查 `openclaw.json`：发起方 Agent 的 `subagents.allowAgents` 是否包含目标 Agent。
-3. 如果是多层级串联（例如 中书 -> 尚书 -> 六部），按需提高 `tools.subagents.maxSpawnDepth`。
+3. 如果是多层级串联（例如 中书 -> 尚书 -> 六部），按需提高 `agents.defaults.subagents.maxSpawnDepth`。
 4. 对深层 subagent 明确设置工具策略（`tools.subagents.tools`），确保调度层能用 `sessions_spawn`，叶子层不再继续 spawn。
 5. 在 SOUL/提示词中禁用旧调用路径：`sessions_send`、`subagents steer`、`exec: openclaw agent ...`。
 

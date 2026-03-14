@@ -38,7 +38,5 @@ All notable changes to this project are documented in this file.
   - `tools.agentToAgent.enabled`
   - `tools.agentToAgent.allow` (merged with project agent IDs)
   - `tools.sessions.visibility`
-  - `tools.subagents.maxSpawnDepth` (compatibility alias)
   - `tools.subagents.tools.allow` default template
   - `tools.subagents.tools.deny` baseline (`gateway`, `cron`, `sessions_send`)
-

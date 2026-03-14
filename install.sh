@@ -250,9 +250,9 @@ if 'visibility' not in sessions_cfg:
 
 # Subagent 工具策略模板（分层协作的最小默认）
 sub_tool_cfg = _ensure_dict(tools_cfg, 'subagents')
-# 兼容路径：部分环境仍读取 tools.subagents.maxSpawnDepth
-if 'maxSpawnDepth' not in sub_tool_cfg:
-    sub_tool_cfg['maxSpawnDepth'] = sub_defaults.get('maxSpawnDepth', 2)
+# OpenClaw 新版不识别 tools.subagents.maxSpawnDepth，清理历史遗留键
+if 'maxSpawnDepth' in sub_tool_cfg:
+    sub_tool_cfg.pop('maxSpawnDepth', None)
 
 sub_tool_policy = _ensure_dict(sub_tool_cfg, 'tools')
 default_subagent_allow = [

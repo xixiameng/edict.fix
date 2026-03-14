@@ -475,7 +475,7 @@ _STATE_AGENT_MAP = {
 1. 在 `openclaw.json` 注册所有参与协作的 Agent（`agents.list`）。
 2. 为发起方配置 `subagents.allowAgents` 白名单（如 `zhongshu -> menxia/shangshu`）。
 3. 在 Agent 提示词中统一约束调用方式：`sessions_spawn + agentId`。
-4. 多层级嵌套协作时，按需调高 `tools.subagents.maxSpawnDepth`。
+4. 多层级嵌套协作时，按需调高 `agents.defaults.subagents.maxSpawnDepth`。
 5. 为深层 subagent 配置 `tools.subagents.tools` 分层策略，避免调度层和执行层工具权限混乱。
 
 典型调用：
