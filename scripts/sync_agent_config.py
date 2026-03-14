@@ -160,6 +160,18 @@ def get_skills(workspace: str):
     return skills
 
 
+def default_agent_dir(agent_id: str) -> str:
+    return str(pathlib.Path.home() / f'.openclaw/agents/{agent_id}/agent')
+
+
+def resolve_agent_dir(agent_cfg, agent_id: str) -> str:
+    if isinstance(agent_cfg, dict):
+        val = agent_cfg.get('agentDir')
+        if isinstance(val, str) and val:
+            return val
+    return default_agent_dir(agent_id)
+
+
 def main():
     cfg = {}
     try:
@@ -186,6 +198,7 @@ def main():
             'model': normalize_model(ag.get('model', default_model), default_model),
             'defaultModel': default_model,
             'workspace': workspace,
+            'agentDir': resolve_agent_dir(ag, ag_id),
             'skills': get_skills(workspace),
             'allowAgents': resolve_allow_agents(ag),
         })
@@ -212,6 +225,7 @@ def main():
             'model': extra['model'],
             'defaultModel': default_model,
             'workspace': extra['workspace'],
+            'agentDir': resolve_agent_dir(extra, ag_id),
             'skills': get_skills(extra['workspace']),
             'allowAgents': extra['allowAgents'],
             'isDefaultModel': True,

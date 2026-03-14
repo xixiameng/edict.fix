@@ -96,6 +96,8 @@ create_workspaces() {
   for agent in "${AGENTS[@]}"; do
     ws="$OC_HOME/workspace-$agent"
     mkdir -p "$ws/skills"
+    agent_state_dir="$OC_HOME/agents/$agent/agent"
+    mkdir -p "$agent_state_dir"
     if [ -f "$REPO_DIR/agents/$agent/SOUL.md" ]; then
       if [ -f "$ws/SOUL.md" ]; then
         # 已存在的 SOUL.md，先备份再覆盖
@@ -187,9 +189,10 @@ updated = 0
 for ag in AGENTS:
     ag_id = ag['id']
     ws = str(pathlib.Path.home() / f'.openclaw/workspace-{ag_id}')
+    agent_dir = str(pathlib.Path.home() / f'.openclaw/agents/{ag_id}/agent')
     spec_allow = ag.get('subagents', {}).get('allowAgents', [])
     if ag_id not in existing_by_id:
-        entry = {'id': ag_id, 'workspace': ws, **{k:v for k,v in ag.items() if k!='id'}}
+        entry = {'id': ag_id, 'workspace': ws, 'agentDir': agent_dir, **{k:v for k,v in ag.items() if k!='id'}}
         agents_list.append(entry)
         added += 1
         print(f'  + added: {ag_id}')
@@ -199,6 +202,9 @@ for ag in AGENTS:
 
         if not entry.get('workspace'):
             entry['workspace'] = ws
+            changed = True
+        if not entry.get('agentDir'):
+            entry['agentDir'] = agent_dir
             changed = True
 
         sub_cfg = _ensure_dict(entry, 'subagents')

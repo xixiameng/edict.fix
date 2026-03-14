@@ -67,3 +67,12 @@ def test_merged_known_models_deduplicates_existing_known_model():
     ids = [m['id'] for m in merged]
     assert ids.count('openai/gpt-4o') == 1
 
+
+def test_resolve_agent_dir_prefers_config_value():
+    agent_cfg = {'agentDir': '/tmp/custom/agent-dir'}
+    assert sac.resolve_agent_dir(agent_cfg, 'taizi') == '/tmp/custom/agent-dir'
+
+
+def test_resolve_agent_dir_fallback_to_default():
+    expected = str(pathlib.Path.home() / '.openclaw/agents/taizi/agent')
+    assert sac.resolve_agent_dir({}, 'taizi') == expected
