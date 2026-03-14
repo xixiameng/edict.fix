@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 import json, pathlib, datetime, logging
 from file_lock import atomic_json_write, atomic_json_read
-from utils import read_json
+from utils import read_json, resolve_repo_base
 
 log = logging.getLogger('refresh')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s', datefmt='%H:%M:%S')
 
-BASE = pathlib.Path(__file__).parent.parent
+BASE = resolve_repo_base(__file__)
 DATA = BASE / 'data'
 
 

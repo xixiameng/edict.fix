@@ -45,6 +45,10 @@ check_deps() {
     exit 1
   fi
   log "openclaw.json: $OC_CFG"
+
+  # 记录项目根目录，供 workspace 内脚本回写统一 data 目录
+  echo "$REPO_DIR" > "$OC_HOME/edict_repo_dir"
+  log "repo pointer: $OC_HOME/edict_repo_dir"
 }
 
 # ── Step 0.5: 备份已有 Agent 数据 ──────────────────────────────
