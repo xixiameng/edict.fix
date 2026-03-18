@@ -172,6 +172,34 @@ def resolve_agent_dir(agent_cfg, agent_id: str) -> str:
     return default_agent_dir(agent_id)
 
 
+def _collect_openclaw_models(cfg):
+    """从 openclaw.json 中收集所有已配置的 model id，与 KNOWN_MODELS 合并去重。
+    解决 #127: 自定义 provider 的 model 不在下拉列表中。
+    """
+    known_ids = {m['id'] for m in KNOWN_MODELS}
+    extra = []
+    agents_cfg = cfg.get('agents', {})
+    # 收集 defaults.model
+    dm = normalize_model(agents_cfg.get('defaults', {}).get('model', {}), '')
+    if dm and dm not in known_ids:
+        extra.append({'id': dm, 'label': dm, 'provider': 'OpenClaw'})
+        known_ids.add(dm)
+    # 收集每个 agent 的 model
+    for ag in agents_cfg.get('list', []):
+        m = normalize_model(ag.get('model', ''), '')
+        if m and m not in known_ids:
+            extra.append({'id': m, 'label': m, 'provider': 'OpenClaw'})
+            known_ids.add(m)
+    # 收集 providers 中的 model id（如 copilot-proxy、anthropic 等）
+    for pname, pcfg in cfg.get('providers', {}).items():
+        for mid in (pcfg.get('models') or []):
+            mid_str = mid if isinstance(mid, str) else (mid.get('id') or mid.get('name') or '')
+            if mid_str and mid_str not in known_ids:
+                extra.append({'id': mid_str, 'label': mid_str, 'provider': pname})
+                known_ids.add(mid_str)
+    return KNOWN_MODELS + extra
+
+
 def main():
     cfg = {}
     try:
@@ -183,6 +211,7 @@ def main():
     agents_cfg = cfg.get('agents', {})
     default_model = normalize_model(agents_cfg.get('defaults', {}).get('model', {}), 'unknown')
     agents_list = agents_cfg.get('list', [])
+    merged_models = _collect_openclaw_models(cfg)
 
     result = []
     seen_ids = set()
@@ -231,10 +260,20 @@ def main():
             'isDefaultModel': True,
         })
 
+    # 保留已有的 dispatchChannel 配置 (Fix #139)
+    existing_cfg = {}
+    cfg_path = DATA / 'agent_config.json'
+    if cfg_path.exists():
+        try:
+            existing_cfg = json.loads(cfg_path.read_text())
+        except Exception:
+            pass
+
     payload = {
         'generatedAt': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'defaultModel': default_model,
-        'knownModels': merged_known_models(cfg, default_model),
+        'knownModels': merged_models,
+        'dispatchChannel': existing_cfg.get('dispatchChannel', 'feishu'),
         'agents': result,
     }
     DATA.mkdir(exist_ok=True)
