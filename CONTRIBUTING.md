@@ -89,6 +89,29 @@ open http://127.0.0.1:7891
 
 ---
 
+## 🏛️ 贡献者阶梯
+
+我们采用渐进式权限模型，让社区成员能够逐步承担更多责任：
+
+| 角色 | 条件 | 权限 |
+|------|------|------|
+| **🌱 Contributor** | 任何人 | Fork → PR → 等待 review |
+| **🏷️ Triage** | 3+ merged PRs | 管理 Issue 标签、分配、关闭重复 Issue |
+| **⚔️ Committer** | 5+ merged PRs + 活跃参与 review | Write 权限，可 merge 非核心路径的 PR |
+| **👑 Maintainer** | 长期信任 + 架构理解 | 可 merge 核心路径，参与架构决策 |
+
+### 晋升流程
+
+1. 维护者会主动邀请活跃贡献者晋升
+2. 也可以在 Issue 中自荐，说明你的贡献记录
+3. 所有晋升决定公开透明
+
+> **核心路径**（需 Maintainer review）：`dashboard/server.py`、`agents/`、`edict/backend/`、`scripts/`、`data/`
+>
+> **开放路径**（Committer 可自主 merge）：`docs/`、`examples/`、`README*.md`、UI 样式调整
+
+---
+
 ## 📝 Commit 规范
 
 我们使用 [Conventional Commits](https://www.conventionalcommits.org/)：
@@ -181,17 +204,26 @@ curl -s http://localhost:7891/api/live-status | python3 -m json.tool | head -20
 
 ## 🙏 行为准则
 
+本项目采用 [Contributor Covenant](CODE_OF_CONDUCT.md) 行为准则。参与本项目即表示你同意遵守其条款。
+
+简要原则：
 - 保持友善和建设性
 - 尊重不同的观点和经验
 - 接受建设性的批评
 - 专注于对社区最有利的事情
 - 对其他社区成员表示同理心
 
-**我们对骚扰行为零容忍。**
+**我们对骚扰行为零容忍。** 详见 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
 
 ---
 
-## 📬 联系方式
+## � 安全漏洞
+
+发现安全问题？请**不要**通过公开 Issue 报告。详见 [SECURITY.md](SECURITY.md)。
+
+---
+
+## �📬 联系方式
 
 - GitHub Issues: [提交问题](https://github.com/cft0808/edict/issues)
 - GitHub Discussions: [社区讨论](https://github.com/cft0808/edict/discussions)

@@ -1,7 +1,7 @@
 ---
 name: Feature Request
 about: 提交功能建议
-labels: enhancement
+labels: enhancement, needs-triage
 ---
 
 ## 功能描述

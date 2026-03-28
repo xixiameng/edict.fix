@@ -1,7 +1,7 @@
 ---
 name: Bug Report
 about: 报告一个 Bug
-labels: bug
+labels: bug, needs-triage
 ---
 
 ## 环境
