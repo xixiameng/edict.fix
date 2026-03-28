@@ -269,11 +269,18 @@ def main():
         except Exception:
             pass
 
+    existing_dispatch_channel = existing_cfg.get('dispatchChannel')
+    if isinstance(existing_dispatch_channel, str):
+        existing_dispatch_channel = existing_dispatch_channel.strip()
+    else:
+        existing_dispatch_channel = ''
+    default_dispatch_channel = os.getenv('DEFAULT_DISPATCH_CHANNEL', '').strip()
+
     payload = {
         'generatedAt': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'defaultModel': default_model,
         'knownModels': merged_models,
-        'dispatchChannel': existing_cfg.get('dispatchChannel') or os.getenv('DEFAULT_DISPATCH_CHANNEL', 'feishu'),
+        'dispatchChannel': existing_dispatch_channel or default_dispatch_channel,
         'agents': result,
     }
     DATA.mkdir(exist_ok=True)

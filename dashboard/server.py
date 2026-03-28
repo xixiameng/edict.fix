@@ -45,6 +45,23 @@ _DEFAULT_ORIGINS = {
     'http://127.0.0.1:5173', 'http://localhost:5173',  # Vite dev server
 }
 _SAFE_NAME_RE = re.compile(r'^[a-zA-Z0-9_\-\u4e00-\u9fff]+$')
+_CHANNEL_ID_RE = re.compile(r'^[a-z0-9][a-z0-9._-]{0,63}$')
+_INTERNAL_NON_DELIVERABLE_CHANNELS = {'tui', 'webchat', 'internal'}
+_DISPATCH_CHANNEL_ORDER = [
+    'wecom',
+    'feishu',
+    'telegram',
+    'discord',
+    'slack',
+    'signal',
+    'whatsapp',
+    'googlechat',
+    'imessage',
+    'line',
+    'irc',
+    'last',
+]
+_DISPATCH_CHANNEL_BASE = set(_DISPATCH_CHANNEL_ORDER)
 
 BASE = pathlib.Path(__file__).parent
 DIST = BASE / 'dist'          # React 构建产物 (npm run build)
@@ -69,6 +86,102 @@ _MIME_TYPES = {
     '.ttf':  'font/ttf',
     '.map':  'application/json',
 }
+
+
+def _normalize_channel_id(raw):
+    if not isinstance(raw, str):
+        return ''
+    ch = raw.strip().lower()
+    if not ch:
+        return ''
+    if ch.startswith('channel:'):
+        ch = ch.split(':', 1)[1]
+    if ch == 'lark':
+        ch = 'feishu'
+    if not _CHANNEL_ID_RE.match(ch):
+        return ''
+    return ch
+
+
+def _extract_channel_ids(payload):
+    """
+    Best-effort extraction of channel ids from OpenClaw CLI JSON output.
+    """
+    out = set()
+    channel_hint_keys = {'channel', 'channelid', 'providerid'}
+    optional_hint_keys = {'id', 'name', 'type', 'pluginid'}
+
+    def _walk(node, parent_key=''):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                lk = str(k).strip().lower()
+                if isinstance(v, str) and (lk in channel_hint_keys or lk in optional_hint_keys):
+                    ch = _normalize_channel_id(v)
+                    if ch and ch not in _INTERNAL_NON_DELIVERABLE_CHANNELS:
+                        if ch not in {'default', 'defaults', 'modelbychannel'}:
+                            out.add(ch)
+                _walk(v, lk)
+            return
+        if isinstance(node, list):
+            for item in node:
+                _walk(item, parent_key)
+            return
+        if isinstance(node, str) and parent_key in channel_hint_keys:
+            ch = _normalize_channel_id(node)
+            if ch and ch not in _INTERNAL_NON_DELIVERABLE_CHANNELS:
+                out.add(ch)
+
+    _walk(payload)
+    return out
+
+
+def _configured_channel_ids():
+    cfg = read_json(OCLAW_HOME / 'openclaw.json', {})
+    channels = cfg.get('channels', {}) if isinstance(cfg, dict) else {}
+    if not isinstance(channels, dict):
+        return set()
+    out = set()
+    for key in channels.keys():
+        ch = _normalize_channel_id(key)
+        if not ch:
+            continue
+        if ch in _INTERNAL_NON_DELIVERABLE_CHANNELS:
+            continue
+        if ch in {'default', 'defaults', 'modelbychannel'}:
+            continue
+        out.add(ch)
+    return out
+
+
+def _detect_openclaw_channels_cli():
+    """
+    Query installed/known channels from `openclaw channels list --json`.
+    Falls back to empty set if command/json format is unavailable.
+    """
+    try:
+        result = subprocess.run(
+            ['openclaw', 'channels', 'list', '--json'],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return set()
+        payload = json.loads(result.stdout)
+        return _extract_channel_ids(payload)
+    except Exception:
+        return set()
+
+
+def resolve_dispatch_channels(include_cli=False):
+    channels = set(_DISPATCH_CHANNEL_BASE)
+    channels.update(_configured_channel_ids())
+    if include_cli:
+        channels.update(_detect_openclaw_channels_cli())
+    channels = {ch for ch in channels if ch and ch not in _INTERNAL_NON_DELIVERABLE_CHANNELS}
+    ordered = [ch for ch in _DISPATCH_CHANNEL_ORDER if ch in channels]
+    extras = sorted(ch for ch in channels if ch not in _DISPATCH_CHANNEL_ORDER)
+    return ordered + extras
 
 
 def cors_headers(h):
@@ -2050,8 +2163,15 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
             # Fix #139/#182: dispatch channel 可配置；未配置时不传 --deliver 避免
             # "unknown channel: feishu" 错误（非飞书用户）
             _agent_cfg = read_json(DATA / 'agent_config.json', {})
-            _channel = (_agent_cfg.get('dispatchChannel') or '').strip()
-            cmd = ['openclaw', 'agent', '--agent', agent_id, '-m', msg, '--timeout', '300']
+            _channel = _normalize_channel_id(_agent_cfg.get('dispatchChannel') or '')
+            if _channel in {'none', 'off', 'disable', 'disabled'}:
+                _channel = ''
+            dispatch_allowed = set(resolve_dispatch_channels(include_cli=True))
+            if _channel and _channel not in dispatch_allowed:
+                log.warning(f'⚠️ dispatchChannel={_channel} 不可用，自动降级为仅会话模式')
+                _channel = ''
+            cmd_base = ['openclaw', 'agent', '--agent', agent_id, '-m', msg, '--timeout', '300']
+            cmd = [*cmd_base]
             if _channel:
                 cmd.extend(['--deliver', '--channel', _channel])
             max_retries = 2
@@ -2072,7 +2192,14 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
                         _scheduler_add_flow(t, f'派发成功：{agent_id}（{trigger}）', to=t.get('org', ''))
                     ))
                     return
-                err = result.stderr[:200] if result.stderr else result.stdout[:200]
+                full_err = (result.stderr or result.stdout or '').strip()
+                err = full_err[:200]
+                if _channel and 'unknown channel' in full_err.lower():
+                    log.warning(f'⚠️ {task_id} 渠道 {_channel} 不可用，自动重试为仅会话模式')
+                    _channel = ''
+                    cmd = [*cmd_base]
+                    if attempt < max_retries:
+                        continue
                 log.warning(f'⚠️ {task_id} 自动派发失败(第{attempt}次): {err}')
                 if attempt < max_retries:
                     import time
@@ -2229,7 +2356,13 @@ class Handler(BaseHTTPRequestHandler):
             task_data_dir = get_task_data_dir()
             self.send_json(read_json(task_data_dir / 'live_status.json'))
         elif p == '/api/agent-config':
-            self.send_json(read_json(DATA / 'agent_config.json'))
+            cfg = read_json(DATA / 'agent_config.json', {})
+            if not isinstance(cfg, dict):
+                cfg = {}
+            if not isinstance(cfg.get('dispatchChannel'), str):
+                cfg['dispatchChannel'] = ''
+            cfg['dispatchChannels'] = resolve_dispatch_channels(include_cli=False)
+            self.send_json(cfg)
         elif p == '/api/model-change-log':
             self.send_json(read_json(DATA / 'model_change_log.json', []))
         elif p == '/api/last-result':
@@ -2609,16 +2742,25 @@ class Handler(BaseHTTPRequestHandler):
 
         # Fix #139: 设置派发渠道（feishu/telegram/wecom/signal/tui）
         elif p == '/api/set-dispatch-channel':
-            channel = body.get('channel', '').strip()
-            allowed = {'feishu', 'telegram', 'wecom', 'signal', 'tui', 'discord', 'slack'}
-            if not channel or channel not in allowed:
-                self.send_json({'ok': False, 'error': f'channel must be one of: {", ".join(sorted(allowed))}'}, 400)
+            raw_channel = body.get('channel', '')
+            channel = _normalize_channel_id(raw_channel)
+            if isinstance(raw_channel, str) and raw_channel.strip().lower() in {'', 'none', 'off', 'disable', 'disabled'}:
+                channel = ''
+            allowed = resolve_dispatch_channels(include_cli=True)
+            allowed_set = set(allowed)
+            if channel and channel not in allowed_set:
+                self.send_json({
+                    'ok': False,
+                    'error': f'channel must be one of: {", ".join(allowed)}',
+                    'allowed': allowed,
+                }, 400)
                 return
             def _set_channel(cfg):
                 cfg['dispatchChannel'] = channel
                 return cfg
             atomic_json_update(DATA / 'agent_config.json', _set_channel, {})
-            self.send_json({'ok': True, 'message': f'派发渠道已切换为 {channel}'})
+            msg = f'派发渠道已切换为 {channel}' if channel else '派发渠道已清空（仅会话，不强制投递）'
+            self.send_json({'ok': True, 'message': msg, 'dispatchChannel': channel, 'allowed': allowed})
 
         # ── 朝堂议政 POST ──
         elif p == '/api/court-discuss/start':
