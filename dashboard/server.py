@@ -11,7 +11,7 @@ Endpoints:
   GET  /api/model-change-log   → data/model_change_log.json
   GET  /api/last-result        → data/last_model_change_result.json
 """
-import json, pathlib, subprocess, sys, threading, argparse, datetime, logging, re, os
+import json, pathlib, subprocess, sys, threading, argparse, datetime, logging, re, os, socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -31,9 +31,15 @@ from court_discuss import (
 log = logging.getLogger('server')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(message)s', datefmt='%H:%M:%S')
 
+CHANNELS_DIR = pathlib.Path(__file__).parent.parent / 'edict' / 'backend' / 'app' / 'channels'
+if str(CHANNELS_DIR.parent) not in sys.path:
+    sys.path.insert(0, str(CHANNELS_DIR.parent))
+from channels import get_channel, get_channel_info, CHANNELS as NOTIFICATION_CHANNELS
+
 OCLAW_HOME = pathlib.Path.home() / '.openclaw'
 MAX_REQUEST_BODY = 1 * 1024 * 1024  # 1 MB
 ALLOWED_ORIGIN = None  # Set via --cors; None means restrict to localhost
+_DASHBOARD_PORT = 7891  # Updated at startup from --port arg
 _DEFAULT_ORIGINS = {
     'http://127.0.0.1:7891', 'http://localhost:7891',
     'http://127.0.0.1:5173', 'http://localhost:5173',  # Vite dev server
@@ -44,6 +50,7 @@ BASE = pathlib.Path(__file__).parent
 DIST = BASE / 'dist'          # React 构建产物 (npm run build)
 DATA = BASE.parent / "data"
 SCRIPTS = BASE.parent / 'scripts'
+_ACTIVE_TASK_DATA_DIR = None
 
 # 静态资源 MIME 类型
 _MIME_TYPES = {
@@ -71,22 +78,73 @@ def cors_headers(h):
     elif req_origin in _DEFAULT_ORIGINS:
         origin = req_origin
     else:
-        origin = 'http://127.0.0.1:7891'
+        origin = f'http://127.0.0.1:{_DASHBOARD_PORT}'
     h.send_header('Access-Control-Allow-Origin', origin)
     h.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
     h.send_header('Access-Control-Allow-Headers', 'Content-Type')
 
 
+def _iter_task_data_dirs():
+    """返回可用的任务数据目录候选（优先 workspace，其次本地 data）。"""
+    dirs = [DATA]
+    for p in sorted(OCLAW_HOME.glob('workspace-*/data')):
+        if p.is_dir():
+            dirs.append(p)
+    return dirs
+
+
+def _task_source_score(task_file: pathlib.Path):
+    """给任务源打分：优先非 demo 任务，其次任务数，再按文件更新时间。"""
+    try:
+        tasks = atomic_json_read(task_file, [])
+    except Exception:
+        tasks = []
+    if not isinstance(tasks, list):
+        tasks = []
+    non_demo = sum(1 for t in tasks if str((t or {}).get('id', '')) and not str((t or {}).get('id', '')).startswith('JJC-DEMO'))
+    try:
+        mtime = task_file.stat().st_mtime
+    except Exception:
+        mtime = 0
+    return (1 if non_demo > 0 else 0, non_demo, len(tasks), mtime)
+
+
+def get_task_data_dir():
+    """自动选择当前任务数据目录，并缓存结果以保持一次服务期内稳定。"""
+    global _ACTIVE_TASK_DATA_DIR
+    if _ACTIVE_TASK_DATA_DIR and _ACTIVE_TASK_DATA_DIR.is_dir():
+        return _ACTIVE_TASK_DATA_DIR
+    best_dir = DATA
+    best_score = (-1, -1, -1, -1)
+    for d in _iter_task_data_dirs():
+        tf = d / 'tasks_source.json'
+        if not tf.exists():
+            continue
+        score = _task_source_score(tf)
+        if score > best_score:
+            best_score = score
+            best_dir = d
+    _ACTIVE_TASK_DATA_DIR = best_dir
+    log.info(f'任务数据源: {_ACTIVE_TASK_DATA_DIR}')
+    return _ACTIVE_TASK_DATA_DIR
+
+
 def load_tasks():
-    return atomic_json_read(DATA / 'tasks_source.json', [])
+    task_data_dir = get_task_data_dir()
+    return atomic_json_read(task_data_dir / 'tasks_source.json', [])
 
 
 def save_tasks(tasks):
-    atomic_json_write(DATA / 'tasks_source.json', tasks)
+    task_data_dir = get_task_data_dir()
+    atomic_json_write(task_data_dir / 'tasks_source.json', tasks)
     # Trigger refresh (异步，不阻塞，避免僵尸进程)
+    script = task_data_dir.parent / 'scripts' / 'refresh_live_data.py'
+    if not script.exists():
+        script = SCRIPTS / 'refresh_live_data.py'
+
     def _refresh():
         try:
-            subprocess.run(['python3', str(SCRIPTS / 'refresh_live_data.py')], timeout=30)
+            subprocess.run(['python3', str(script)], timeout=30)
         except Exception as e:
             log.warning(f'refresh_live_data.py 触发失败: {e}')
     threading.Thread(target=_refresh, daemon=True).start()
@@ -475,19 +533,51 @@ def remove_remote_skill(agent_id, skill_name):
 
 
 def _compute_checksum(content: str) -> str:
-    """计算内容的简单校验和（SHA256 的前16字符）"""
     import hashlib
     return hashlib.sha256(content.encode()).hexdigest()[:16]
 
 
-def push_to_feishu():
-    """Push morning brief link to Feishu via webhook."""
-    cfg = read_json(DATA / 'morning_brief_config.json', {})
+def migrate_notification_config():
+    """自动迁移旧配置 (feishu_webhook) 到新结构 (notification)"""
+    cfg_path = DATA / 'morning_brief_config.json'
+    cfg = read_json(cfg_path, {})
+    if not cfg:
+        return
+    if 'notification' in cfg:
+        return
+    if 'feishu_webhook' not in cfg:
+        return
     webhook = cfg.get('feishu_webhook', '').strip()
+    cfg['notification'] = {
+        'enabled': bool(webhook),
+        'channel': 'feishu',
+        'webhook': webhook
+    }
+    try:
+        atomic_json_write(cfg_path, cfg)
+        log.info('已自动迁移 feishu_webhook 到 notification 配置')
+    except Exception as e:
+        log.warning(f'迁移配置失败: {e}')
+
+
+def push_notification():
+    """通用消息推送 (支持多渠道)"""
+    cfg = read_json(DATA / 'morning_brief_config.json', {})
+    notification = cfg.get('notification', {})
+    if not notification and cfg.get('feishu_webhook'):
+        notification = {'enabled': True, 'channel': 'feishu', 'webhook': cfg['feishu_webhook']}
+    if not notification.get('enabled', True):
+        return
+    channel_type = notification.get('channel', 'feishu')
+    webhook = notification.get('webhook', '').strip()
     if not webhook:
         return
-    if not validate_url(webhook, allowed_schemes=('https',), allowed_domains=('open.feishu.cn', 'open.larksuite.com')):
-        log.warning(f'飞书 Webhook URL 不合法: {webhook}')
+    channel_cls = get_channel(channel_type)
+    if not channel_cls:
+        log.warning(f'未知的通知渠道: {channel_type}')
+        return
+    if not channel_cls.validate_webhook(webhook):
+        log.warning(f'{channel_cls.label} Webhook URL 不合法: {webhook}')
         return
     brief = read_json(DATA / 'morning_brief.json', {})
     date_str = brief.get('date', '')
@@ -500,23 +590,16 @@ def push_to_feishu():
             cat_lines.append(f'  {cat}: {len(items)} 条')
     summary = '\n'.join(cat_lines)
     date_fmt = date_str[:4] + '年' + date_str[4:6] + '月' + date_str[6:] + '日' if len(date_str) == 8 else date_str
-    payload = json.dumps({
-        'msg_type': 'interactive',
-        'card': {
-            'header': {'title': {'tag': 'plain_text', 'content': f'📰 天下要闻 · {date_fmt}'}, 'template': 'blue'},
-            'elements': [
-                {'tag': 'div', 'text': {'tag': 'lark_md', 'content': f'共 **{total}** 条要闻已更新\n{summary}'}},
-                {'tag': 'action', 'actions': [{'tag': 'button', 'text': {'tag': 'plain_text', 'content': '🔗 查看完整简报'}, 'url': 'http://127.0.0.1:7891', 'type': 'primary'}]},
-                {'tag': 'note', 'elements': [{'tag': 'plain_text', 'content': f"采集于 {brief.get('generated_at', '')}"}]}
-            ]
-        }
-    }).encode()
-    try:
-        req = Request(webhook, data=payload, headers={'Content-Type': 'application/json'})
-        resp = urlopen(req, timeout=10)
-        print(f'[飞书] 推送成功 ({resp.status})')
-    except Exception as e:
-        print(f'[飞书] 推送失败: {e}', file=sys.stderr)
+    title = f'📰 天下要闻 · {date_fmt}'
+    content = f'共 **{total}** 条要闻已更新\n{summary}'
+    url = f'http://127.0.0.1:{_DASHBOARD_PORT}'
+    success = channel_cls.send(webhook, title, content, url)
+    print(f'[{channel_cls.label}] 推送{"成功" if success else "失败"}')
+
+
+def push_to_feishu():
+    """Push morning brief link to Feishu via webhook. (已弃用，使用 push_notification)"""
+    push_notification()
 
 
 # 旨意标题最低要求
@@ -666,8 +749,17 @@ _AGENT_DEPTS = [
 
 
 def _check_gateway_alive():
-    """检测 Gateway 进程是否在运行。"""
+    """检测 Gateway 是否在运行。
+
+    Windows 上不要依赖 pgrep；优先通过本地端口探测判断。
+    """
+    if _check_gateway_probe():
+        return True
     try:
+        if os.name == 'nt':
+            with socket.create_connection(('127.0.0.1', 18789), timeout=2):
+                return True
+            return False
         result = subprocess.run(['pgrep', '-f', 'openclaw-gateway'],
                                 capture_output=True, text=True, timeout=5)
         return result.returncode == 0
@@ -677,12 +769,15 @@ def _check_gateway_alive():
 
 def _check_gateway_probe():
     """通过 HTTP probe 检测 Gateway 是否响应。"""
-    try:
-        from urllib.request import urlopen
-        resp = urlopen('http://127.0.0.1:18789/', timeout=3)
-        return resp.status == 200
-    except Exception:
-        return False
+    for url in ('http://127.0.0.1:18789/', 'http://127.0.0.1:18789/healthz'):
+        try:
+            from urllib.request import urlopen
+            resp = urlopen(url, timeout=3)
+            if 200 <= resp.status < 500:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 def _get_agent_session_status(agent_id):
@@ -1952,11 +2047,13 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
                     'lastDispatchTrigger': trigger,
                 }))
                 return
-            # Fix #139: dispatch channel 可配置（默认 feishu，支持 telegram/wecom/signal 等）
+            # Fix #139/#182: dispatch channel 可配置；未配置时不传 --deliver 避免
+            # "unknown channel: feishu" 错误（非飞书用户）
             _agent_cfg = read_json(DATA / 'agent_config.json', {})
-            _channel = (_agent_cfg.get('dispatchChannel') or 'feishu').strip()
-            cmd = ['openclaw', 'agent', '--agent', agent_id, '-m', msg,
-                   '--deliver', '--channel', _channel, '--timeout', '300']
+            _channel = (_agent_cfg.get('dispatchChannel') or '').strip()
+            cmd = ['openclaw', 'agent', '--agent', agent_id, '-m', msg, '--timeout', '300']
+            if _channel:
+                cmd.extend(['--deliver', '--channel', _channel])
             max_retries = 2
             err = ''
             for attempt in range(1, max_retries + 1):
@@ -2123,12 +2220,14 @@ class Handler(BaseHTTPRequestHandler):
         if p in ('', '/dashboard', '/dashboard.html'):
             self.send_file(DIST / 'index.html')
         elif p == '/healthz':
-            checks = {'dataDir': DATA.is_dir(), 'tasksReadable': (DATA / 'tasks_source.json').exists()}
-            checks['dataWritable'] = os.access(str(DATA), os.W_OK)
+            task_data_dir = get_task_data_dir()
+            checks = {'dataDir': task_data_dir.is_dir(), 'tasksReadable': (task_data_dir / 'tasks_source.json').exists()}
+            checks['dataWritable'] = os.access(str(task_data_dir), os.W_OK)
             all_ok = all(checks.values())
             self.send_json({'status': 'ok' if all_ok else 'degraded', 'ts': now_iso(), 'checks': checks})
         elif p == '/api/live-status':
-            self.send_json(read_json(DATA / 'live_status.json'))
+            task_data_dir = get_task_data_dir()
+            self.send_json(read_json(task_data_dir / 'live_status.json'))
         elif p == '/api/agent-config':
             self.send_json(read_json(DATA / 'agent_config.json'))
         elif p == '/api/model-change-log':
@@ -2140,6 +2239,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p == '/api/morning-brief':
             self.send_json(read_json(DATA / 'morning_brief.json', {}))
         elif p == '/api/morning-config':
+            migrate_notification_config()
             self.send_json(read_json(DATA / 'morning_brief_config.json', {
                 'categories': [
                     {'name': '政治', 'enabled': True},
@@ -2147,8 +2247,11 @@ class Handler(BaseHTTPRequestHandler):
                     {'name': '经济', 'enabled': True},
                     {'name': 'AI大模型', 'enabled': True},
                 ],
-                'keywords': [], 'custom_feeds': [], 'feishu_webhook': '',
+                'keywords': [], 'custom_feeds': [],
+                'notification': {'enabled': True, 'channel': 'feishu', 'webhook': ''},
             }))
+        elif p == '/api/notification-channels':
+            self.send_json({'ok': True, 'channels': get_channel_info()})
         elif p.startswith('/api/morning-brief/'):
             date = p.split('/')[-1]
             # 标准化日期格式为 YYYYMMDD（兼容 YYYY-MM-DD 输入）
@@ -2180,6 +2283,29 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(get_scheduler_state(task_id))
         elif p == '/api/agents-status':
             self.send_json(get_agents_status())
+        elif p.startswith('/api/task-output/'):
+            task_id = p.replace('/api/task-output/', '')
+            if not task_id or not _SAFE_NAME_RE.match(task_id):
+                self.send_json({'ok': False, 'error': 'invalid task_id'}, 400)
+            else:
+                tasks = load_tasks()
+                task = next((t for t in tasks if t.get('id') == task_id), None)
+                if not task:
+                    self.send_json({'ok': False, 'error': 'task not found'}, 404)
+                else:
+                    output_path = task.get('output', '')
+                    if not output_path or output_path == '-':
+                        self.send_json({'ok': True, 'taskId': task_id, 'content': '', 'exists': False})
+                    else:
+                        p_out = pathlib.Path(output_path)
+                        if not p_out.exists():
+                            self.send_json({'ok': True, 'taskId': task_id, 'content': '', 'exists': False})
+                        else:
+                            try:
+                                content = p_out.read_text(encoding='utf-8', errors='replace')[:50000]
+                                self.send_json({'ok': True, 'taskId': task_id, 'content': content, 'exists': True})
+                            except Exception as e:
+                                self.send_json({'ok': False, 'error': f'读取失败: {e}'}, 500)
         elif p.startswith('/api/agent-activity/'):
             agent_id = p.replace('/api/agent-activity/', '')
             if not agent_id or not _SAFE_NAME_RE.match(agent_id):
@@ -2222,11 +2348,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if p == '/api/morning-config':
-            # 字段校验
             if not isinstance(body, dict):
                 self.send_json({'ok': False, 'error': '请求体必须是 JSON 对象'}, 400)
                 return
-            allowed_keys = {'categories', 'keywords', 'custom_feeds', 'feishu_webhook'}
+            allowed_keys = {'categories', 'keywords', 'custom_feeds', 'notification', 'feishu_webhook'}
             unknown = set(body.keys()) - allowed_keys
             if unknown:
                 self.send_json({'ok': False, 'error': f'未知字段: {", ".join(unknown)}'}, 400)
@@ -2237,11 +2362,24 @@ class Handler(BaseHTTPRequestHandler):
             if 'keywords' in body and not isinstance(body['keywords'], list):
                 self.send_json({'ok': False, 'error': 'keywords 必须是数组'}, 400)
                 return
-            # 飞书 Webhook 校验
-            webhook = body.get('feishu_webhook', '').strip()
-            if webhook and not validate_url(webhook, allowed_schemes=('https',), allowed_domains=('open.feishu.cn', 'open.larksuite.com')):
-                self.send_json({'ok': False, 'error': '飞书 Webhook URL 无效，仅支持 https://open.feishu.cn 或 open.larksuite.com 域名'}, 400)
-                return
+            if 'notification' in body:
+                noti = body['notification']
+                if not isinstance(noti, dict):
+                    self.send_json({'ok': False, 'error': 'notification 必须是对象'}, 400)
+                    return
+                channel_type = noti.get('channel', 'feishu')
+                if channel_type not in NOTIFICATION_CHANNELS:
+                    self.send_json({'ok': False, 'error': f'不支持的渠道: {channel_type}'}, 400)
+                    return
+                webhook = noti.get('webhook', '').strip()
+                if webhook:
+                    channel_cls = get_channel(channel_type)
+                    if channel_cls and not channel_cls.validate_webhook(webhook):
+                        self.send_json({'ok': False, 'error': f'{channel_cls.label} Webhook URL 无效'}, 400)
+                        return
+            webhook_legacy = body.get('feishu_webhook', '').strip()
+            if webhook_legacy and 'notification' not in body:
+                body['notification'] = {'enabled': True, 'channel': 'feishu', 'webhook': webhook_legacy}
             cfg_path = DATA / 'morning_brief_config.json'
             cfg_path.write_text(json.dumps(body, ensure_ascii=False, indent=2))
             self.send_json({'ok': True, 'message': '订阅配置已保存'})
@@ -2534,12 +2672,18 @@ def main():
     parser.add_argument('--cors', default=None, help='Allowed CORS origin (default: reflect request Origin header)')
     args = parser.parse_args()
 
-    global ALLOWED_ORIGIN
+    global ALLOWED_ORIGIN, _DASHBOARD_PORT, _DEFAULT_ORIGINS
     ALLOWED_ORIGIN = args.cors
+    _DASHBOARD_PORT = args.port
+    _DEFAULT_ORIGINS = _DEFAULT_ORIGINS | {
+        f'http://127.0.0.1:{args.port}', f'http://localhost:{args.port}',
+    }
 
     server = HTTPServer((args.host, args.port), Handler)
     log.info(f'三省六部看板启动 → http://{args.host}:{args.port}')
     print(f'   按 Ctrl+C 停止')
+
+    migrate_notification_config()
 
     # 启动恢复：重新派发上次被 kill 中断的 queued 任务
     threading.Timer(3.0, _startup_recover_queued_dispatches).start()
