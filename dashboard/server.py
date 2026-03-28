@@ -184,6 +184,18 @@ def resolve_dispatch_channels(include_cli=False):
     return ordered + extras
 
 
+def _openclaw_agent_cmd(agent_id, message, timeout, channel='', msg_flag='--message', channel_flag='--reply-channel'):
+    cmd = ['openclaw', 'agent', '--agent', agent_id, msg_flag, message, '--timeout', str(timeout)]
+    if channel:
+        cmd.extend(['--deliver', channel_flag, channel])
+    return cmd
+
+
+def _openclaw_option_error(err_text):
+    low = (err_text or '').lower()
+    return any(tok in low for tok in ('unknown option', 'unknown flag', 'unrecognized option', 'no such option'))
+
+
 def cors_headers(h):
     req_origin = h.headers.get('Origin', '')
     if ALLOWED_ORIGIN:
@@ -1037,17 +1049,27 @@ def wake_agent(agent_id, message=''):
 
     def do_wake():
         try:
-            cmd = ['openclaw', 'agent', '--agent', runtime_id, '-m', msg, '--timeout', '120']
+            msg_flags = ['--message', '-m']
+            msg_flag_idx = 0
+            cmd = _openclaw_agent_cmd(runtime_id, msg, 120, msg_flag=msg_flags[msg_flag_idx])
             log.info(f'🔔 唤醒 {agent_id}...')
-            # 带重试（最多2次）
-            for attempt in range(1, 3):
+            # 带重试（最多3次），并兼容新旧 openclaw 参数
+            max_retries = 3
+            for attempt in range(1, max_retries + 1):
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=130)
                 if result.returncode == 0:
                     log.info(f'✅ {agent_id} 已唤醒')
                     return
-                err_msg = result.stderr[:200] if result.stderr else result.stdout[:200]
+                full_err = (result.stderr or result.stdout or '').strip()
+                err_msg = full_err[:200]
+                if _openclaw_option_error(full_err) and msg_flag_idx + 1 < len(msg_flags):
+                    msg_flag_idx += 1
+                    cmd = _openclaw_agent_cmd(runtime_id, msg, 120, msg_flag=msg_flags[msg_flag_idx])
+                    log.warning(f'⚠️ {agent_id} 检测到 openclaw 参数兼容问题，自动切换为 {msg_flags[msg_flag_idx]} 重试')
+                    if attempt < max_retries:
+                        continue
                 log.warning(f'⚠️ {agent_id} 唤醒失败(第{attempt}次): {err_msg}')
-                if attempt < 2:
+                if attempt < max_retries:
                     import time
                     time.sleep(5)
             log.error(f'❌ {agent_id} 唤醒最终失败')
@@ -2170,11 +2192,22 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
             if _channel and _channel not in dispatch_allowed:
                 log.warning(f'⚠️ dispatchChannel={_channel} 不可用，自动降级为仅会话模式')
                 _channel = ''
-            cmd_base = ['openclaw', 'agent', '--agent', agent_id, '-m', msg, '--timeout', '300']
-            cmd = [*cmd_base]
-            if _channel:
-                cmd.extend(['--deliver', '--channel', _channel])
-            max_retries = 2
+            msg_flags = ['--message', '-m']
+            channel_flags = ['--reply-channel', '--channel']
+            msg_flag_idx = 0
+            channel_flag_idx = 0
+
+            def _build_dispatch_cmd():
+                if _channel:
+                    return _openclaw_agent_cmd(
+                        agent_id, msg, 300, channel=_channel,
+                        msg_flag=msg_flags[msg_flag_idx],
+                        channel_flag=channel_flags[channel_flag_idx],
+                    )
+                return _openclaw_agent_cmd(agent_id, msg, 300, msg_flag=msg_flags[msg_flag_idx])
+
+            cmd = _build_dispatch_cmd()
+            max_retries = 4
             err = ''
             for attempt in range(1, max_retries + 1):
                 log.info(f'🔄 自动派发 {task_id} → {agent_id} (第{attempt}次)...')
@@ -2197,8 +2230,25 @@ def dispatch_for_state(task_id, task, new_state, trigger='state-transition'):
                 if _channel and 'unknown channel' in full_err.lower():
                     log.warning(f'⚠️ {task_id} 渠道 {_channel} 不可用，自动重试为仅会话模式')
                     _channel = ''
-                    cmd = [*cmd_base]
+                    cmd = _build_dispatch_cmd()
                     if attempt < max_retries:
+                        continue
+                if _openclaw_option_error(full_err):
+                    switched = False
+                    if _channel and channel_flag_idx + 1 < len(channel_flags):
+                        channel_flag_idx += 1
+                        switched = True
+                        log.warning(
+                            f'⚠️ {task_id} 检测到 openclaw 渠道参数兼容问题，自动切换为 {channel_flags[channel_flag_idx]} 重试'
+                        )
+                    elif msg_flag_idx + 1 < len(msg_flags):
+                        msg_flag_idx += 1
+                        switched = True
+                        log.warning(
+                            f'⚠️ {task_id} 检测到 openclaw 消息参数兼容问题，自动切换为 {msg_flags[msg_flag_idx]} 重试'
+                        )
+                    if switched and attempt < max_retries:
+                        cmd = _build_dispatch_cmd()
                         continue
                 log.warning(f'⚠️ {task_id} 自动派发失败(第{attempt}次): {err}')
                 if attempt < max_retries:
