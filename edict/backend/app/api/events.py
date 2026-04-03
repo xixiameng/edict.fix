@@ -1,4 +1,5 @@
 """Events API — 事件查询与审计。"""
+from __future__ import annotations
 
 import logging
 from datetime import datetime

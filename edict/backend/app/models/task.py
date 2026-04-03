@@ -1,4 +1,5 @@
 """Task 模型 — 三省六部任务核心表。"""
+from __future__ import annotations
 
 import enum
 import uuid

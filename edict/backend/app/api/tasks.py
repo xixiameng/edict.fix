@@ -1,4 +1,5 @@
 """Tasks API — 任务的 CRUD 和状态流转。"""
+from __future__ import annotations
 
 import uuid
 import logging

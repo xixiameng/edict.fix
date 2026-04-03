@@ -1,4 +1,5 @@
 """Edict 配置管理 — 从环境变量加载所有配置。"""
+from __future__ import annotations
 
 from functools import lru_cache
 

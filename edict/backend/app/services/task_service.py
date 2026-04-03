@@ -2,8 +2,7 @@
 
 所有业务规则集中在此：
 - 创建任务 → 发布 task.created 事件
-- 状态流转 → 校验合法性 + 发布状态事件
-- 查询、过滤、聚合
+- 状态流转 → 校验合法性 + 发布状态事件from __future__ import annotations- 查询、过滤、聚合
 """
 
 import logging

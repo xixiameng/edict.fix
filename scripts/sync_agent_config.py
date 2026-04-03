@@ -184,6 +184,16 @@ def _collect_openclaw_models(cfg):
     if dm and dm not in known_ids:
         extra.append({'id': dm, 'label': dm, 'provider': 'OpenClaw'})
         known_ids.add(dm)
+    # 收集 defaults.models 中的所有模型（OpenClaw 默认启用的模型列表）
+    defaults_models = agents_cfg.get('defaults', {}).get('models', {})
+    if isinstance(defaults_models, dict):
+        for model_id in defaults_models.keys():
+            if model_id and model_id not in known_ids:
+                provider = 'OpenClaw'
+                if '/' in model_id:
+                    provider = model_id.split('/')[0]
+                extra.append({'id': model_id, 'label': model_id, 'provider': provider})
+                known_ids.add(model_id)
     # 收集每个 agent 的 model
     for ag in agents_cfg.get('list', []):
         m = normalize_model(ag.get('model', ''), '')

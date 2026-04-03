@@ -1,8 +1,7 @@
 """Legacy 兼容路由 — 通过旧版 task_id (JJC-xxx) 操作任务。
 
 旧版 kanban_update.py 使用自定义 ID (JJC-20260301-007)，
-Edict 使用 UUID。此路由通过 tags 或 meta.legacy_id 映射。
-"""
+Edict 使用 UUID。此路由通过 tags 或 meta.legacy_id 映射。from __future__ import annotations"""
 
 import logging
 from fastapi import APIRouter, Depends, HTTPException
